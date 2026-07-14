@@ -1,0 +1,379 @@
+{
+  "name": "LinkedIn Lead Enrichment Engine",
+  "nodes": [
+    {
+      "id": "manual-trigger-enrich",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 300],
+      "disabled": false,
+      "parameters": {}
+    },
+    {
+      "id": "read-linkedin-leads",
+      "name": "Read LinkedIn Leads",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [220, 300],
+      "disabled": false,
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "LinkedIn Leads"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "filter-new-leads",
+      "name": "Filter New Leads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [440, 300],
+      "disabled": false,
+      "parameters": {
+        "language": "javaScript",
+        "sourceCode": {
+          "javaScript": "// Filter leads with LinkedIn URL but not enriched yet\nconst leads = $input.all().filter(item => {\n  const l = item.json;\n  const url = l['LinkedIn URL'] || l.linkedinUrl || l.linkedin_url || '';\n  const status = l.Status || 'New';\n  return url.length > 0 && status === 'New';\n});\n\nif (leads.length === 0) {\n  return [{ json: { message: 'No new leads to enrich', count: 0 } }];\n}\n\nreturn leads.map(item => {\n  const l = item.json;\n  return {\n    json: {\n      leadId: l['Lead ID'] || l.leadId || '',\n      name: l.Name || l.name || '',\n      linkedinUrl: l['LinkedIn URL'] || l.linkedinUrl || l.linkedin_url || '',\n      headline: l.Headline || l.headline || '',\n      company: l.Company || l.company || '',\n      jobTitle: l['Job Title'] || l.jobTitle || '',\n      notes: l.Notes || l.notes || ''\n    }\n  };\n});"
+        }
+      }
+    },
+    {
+      "id": "if-has-leads",
+      "name": "Has Leads?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [660, 300],
+      "disabled": false,
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-lead-check",
+              "leftValue": "={{ $json.leadId || $json.linkedinUrl }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "apollo-enrich",
+      "name": "Apollo: Enrich by LinkedIn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [900, 200],
+      "disabled": false,
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apollo.io/api/v1/people/enrich",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "linkedin_url",
+              "value": "={{ $json.linkedinUrl }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "__rl": true,
+          "value": "YOUR_APOLLO_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "parse-enrich-result",
+      "name": "Parse & Score Enriched Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [1140, 200],
+      "disabled": false,
+      "parameters": {
+        "language": "javaScript",
+        "sourceCode": {
+          "javaScript": "// Parse Apollo response and compute enrichment score\nconst item = $input.item.json;\nconst person = item.person || {};\nconst org = person.organization || {};\n\nconst enriched = {\n  leadId: item.leadId || '',\n  linkedinUrl: item.linkedinUrl || '',\n  name: [person.first_name, person.last_name].filter(Boolean).join(' ') || item.name,\n  headline: person.headline || item.headline || '',\n  company: org.name || item.company || '',\n  companySize: org.employee_count || '',\n  industry: org.industry || '',\n  jobTitle: person.title || item.jobTitle || '',\n  email: person.email || '',\n  emailStatus: person.email_status || '',\n  phone: person.phone || '',\n  city: person.city || '',\n  state: person.state || '',\n  country: person.country || '',\n  techStack: (org.technology_names || []).join(', '),\n  twitterUrl: person.twitter_url || '',\n  linkedinBio: person.linkedin_bio || person.summary || '',\n  enrichedAt: new Date().toISOString()\n};\n\n// Scoring\nlet score = 0;\nif (enriched.email) score += 3;\nif (enriched.phone) score += 2;\nif (enriched.companySize) score += 1;\nif (enriched.techStack) score += 1;\nif (enriched.jobTitle) score += 1;\n\nenriched.score = score;\nif (score >= 5) enriched.status = 'Hot';\nelse if (score >= 3) enriched.status = 'Warm';\nelse enriched.status = 'Cold';\n\nreturn { json: enriched };"
+        }
+      }
+    },
+    {
+      "id": "write-enriched",
+      "name": "GS: Append Enriched",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1380, 200],
+      "disabled": false,
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Enriched Leads"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "0": {
+              "columnName": "Lead ID",
+              "columnValue": "={{ $json.leadId }}"
+            },
+            "1": {
+              "columnName": "Name",
+              "columnValue": "={{ $json.name }}"
+            },
+            "2": {
+              "columnName": "LinkedIn URL",
+              "columnValue": "={{ $json.linkedinUrl }}"
+            },
+            "3": {
+              "columnName": "Headline",
+              "columnValue": "={{ $json.headline }}"
+            },
+            "4": {
+              "columnName": "Company",
+              "columnValue": "={{ $json.company }}"
+            },
+            "5": {
+              "columnName": "Company Size",
+              "columnValue": "={{ $json.companySize }}"
+            },
+            "6": {
+              "columnName": "Industry",
+              "columnValue": "={{ $json.industry }}"
+            },
+            "7": {
+              "columnName": "Job Title",
+              "columnValue": "={{ $json.jobTitle }}"
+            },
+            "8": {
+              "columnName": "Email",
+              "columnValue": "={{ $json.email }}"
+            },
+            "9": {
+              "columnName": "Email Status",
+              "columnValue": "={{ $json.emailStatus }}"
+            },
+            "10": {
+              "columnName": "Phone",
+              "columnValue": "={{ $json.phone }}"
+            },
+            "11": {
+              "columnName": "Tech Stack",
+              "columnValue": "={{ $json.techStack }}"
+            },
+            "12": {
+              "columnName": "Score",
+              "columnValue": "={{ $json.score }}"
+            },
+            "13": {
+              "columnName": "Status",
+              "columnValue": "={{ $json.status }}"
+            },
+            "14": {
+              "columnName": "Enriched At",
+              "columnValue": "={{ $json.enrichedAt }}"
+            }
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "update-linkedin-status",
+      "name": "GS: Mark Enriched",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1380, 400],
+      "disabled": false,
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "LinkedIn Leads"
+        },
+        "byRow": {
+          "keyRow": 0,
+          "dataStartRow": 1,
+          "column": "Lead ID"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "0": {
+              "columnName": "Status",
+              "columnValue": "=Enriched"
+            },
+            "1": {
+              "columnName": "Score",
+              "columnValue": "={{ $json.score }}"
+            },
+            "2": {
+              "columnName": "Enriched At",
+              "columnValue": "={{ $json.enrichedAt }}"
+            },
+            "3": {
+              "columnName": "Email",
+              "columnValue": "={{ $json.email }}"
+            }
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "no-leads-end",
+      "name": "No Leads — Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 480],
+      "disabled": false,
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read LinkedIn Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read LinkedIn Leads": {
+      "main": [
+        [
+          {
+            "node": "Filter New Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter New Leads": {
+      "main": [
+        [
+          {
+            "node": "Has Leads?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Leads?": {
+      "main": [
+        [
+          {
+            "node": "Apollo: Enrich by LinkedIn",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Leads — Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apollo: Enrich by LinkedIn": {
+      "main": [
+        [
+          {
+            "node": "Parse & Score Enriched Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Score Enriched Lead": {
+      "main": [
+        [
+          {
+            "node": "GS: Append Enriched",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "GS: Mark Enriched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "versionId": "1.0",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "linkedin"
+    },
+    {
+      "name": "enrichment"
+    }
+  ],
+  "id": "linkedin-enrichment-engine"
+}

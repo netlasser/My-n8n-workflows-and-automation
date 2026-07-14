@@ -1,0 +1,283 @@
+{
+  "name": "Connection Note Generator",
+  "nodes": [
+    {
+      "id": "manual-trigger-note",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 300],
+      "disabled": false,
+      "parameters": {}
+    },
+    {
+      "id": "read-enriched-leads",
+      "name": "Read Enriched Leads",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [220, 300],
+      "disabled": false,
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Enriched Leads"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "filter-note-candidates",
+      "name": "Filter Note Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [440, 300],
+      "disabled": false,
+      "parameters": {
+        "language": "javaScript",
+        "sourceCode": {
+          "javaScript": "// Only generate notes for leads that have a note-relevant score\nconst candidates = $input.all().filter(item => {\n  const l = item.json;\n  const status = l.Status || 'New';\n  const name = l.Name || l.name || '';\n  return (status === 'Hot' || status === 'Warm') && name.length > 0;\n});\n\nif (candidates.length === 0) {\n  return [{ json: { message: 'No candidates for notes', count: 0 } }];\n}\n\nreturn candidates.map(item => {\n  const l = item.json;\n  return {\n    json: {\n      leadId: l['Lead ID'] || l.leadId || '',\n      name: l.Name || l.name || '',\n      headline: l.Headline || l.headline || '',\n      company: l.Company || l.company || '',\n      industry: l.Industry || l.industry || '',\n      jobTitle: l['Job Title'] || l.jobTitle || '',\n      techStack: l['Tech Stack'] || l.techStack || '',\n      companySize: l['Company Size'] || l.companySize || '',\n      linkedinUrl: l['LinkedIn URL'] || l.linkedinUrl || ''\n    }\n  };\n});"
+        }
+      }
+    },
+    {
+      "id": "if-note-candidates",
+      "name": "Has Candidates?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [660, 300],
+      "disabled": false,
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-name",
+              "leftValue": "={{ $json.name }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "openai-generate-note",
+      "name": "OpenAI: Generate Connection Note",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [900, 200],
+      "disabled": false,
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You write LinkedIn connection request notes. Rules:\n- Max 300 characters (LinkedIn limit)\n- Reference something specific (company, role, post, mutual interest)\n- Natural and conversational, not salesy\n- Offer clear value or a reason to connect\n- Do not use markdown or quotes\n- Return 2 variants separated by '---'"
+            },
+            {
+              "role": "user",
+              "content": "={{ 'Write 2 LinkedIn connection note variants for:\\nName: ' + $json.name + '\\nJob Title: ' + $json.jobTitle + '\\nCompany: ' + $json.company + '\\nIndustry: ' + $json.industry + '\\nTech Stack: ' + $json.techStack + '\\nHeadline: ' + $json.headline }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.8,
+          "maxTokens": 200
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "__rl": true,
+          "value": "YOUR_OPENAI_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "parse-note-output",
+      "name": "Parse Note Variants",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [1140, 200],
+      "disabled": false,
+      "parameters": {
+        "language": "javaScript",
+        "sourceCode": {
+          "javaScript": "// Split OpenAI response into 2 variants + clean up\nconst item = $input.item.json;\nconst raw = item.choices?.[0]?.message?.content || '';\nconst variants = raw.split('---').map(v => v.trim()).filter(Boolean);\n\nconst noteV1 = variants[0] || '';\nconst noteV2 = variants[1] || '';\n\nreturn {\n  json: {\n    leadId: item.leadId,\n    name: item.name,\n    company: item.company,\n    noteV1: noteV1,\n    noteV2: noteV2,\n    generatedAt: new Date().toISOString()\n  }\n};"
+        }
+      }
+    },
+    {
+      "id": "update-with-notes",
+      "name": "GS: Update with Notes",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1380, 200],
+      "disabled": false,
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Enriched Leads"
+        },
+        "byRow": {
+          "keyRow": 0,
+          "dataStartRow": 1,
+          "column": "Lead ID"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "0": {
+              "columnName": "Connection Note V1",
+              "columnValue": "={{ $json.noteV1 }}"
+            },
+            "1": {
+              "columnName": "Connection Note V2",
+              "columnValue": "={{ $json.noteV2 }}"
+            },
+            "2": {
+              "columnName": "Status",
+              "columnValue": "=Note Ready"
+            },
+            "3": {
+              "columnName": "Note Generated At",
+              "columnValue": "={{ $json.generatedAt }}"
+            }
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "no-candidates-end",
+      "name": "No Candidates — Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 480],
+      "disabled": false,
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Enriched Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Enriched Leads": {
+      "main": [
+        [
+          {
+            "node": "Filter Note Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Note Candidates": {
+      "main": [
+        [
+          {
+            "node": "Has Candidates?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Candidates?": {
+      "main": [
+        [
+          {
+            "node": "OpenAI: Generate Connection Note",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Candidates — Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI: Generate Connection Note": {
+      "main": [
+        [
+          {
+            "node": "Parse Note Variants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Note Variants": {
+      "main": [
+        [
+          {
+            "node": "GS: Update with Notes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "versionId": "1.0",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "linkedin"
+    },
+    {
+      "name": "connection-notes"
+    }
+  ],
+  "id": "connection-note-generator"
+}

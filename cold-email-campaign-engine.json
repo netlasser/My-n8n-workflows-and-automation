@@ -1,0 +1,357 @@
+{
+  "name": "Cold Email Campaign Engine",
+  "nodes": [
+    {
+      "id": "daily-trigger",
+      "name": "Daily Schedule (8 AM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [0, 300],
+      "disabled": false,
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1-5"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "read-leads",
+      "name": "Read Leads from Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [220, 300],
+      "disabled": false,
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Campaign"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "filter-enrich",
+      "name": "Filter & Enrich Leads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [440, 300],
+      "disabled": false,
+      "parameters": {
+        "language": "javaScript",
+        "sourceCode": {
+          "javaScript": "// Filter 'To Contact' leads and prepare for A/B split\nconst dailyLimit = 30;\nconst leads = $input.all()\n  .filter(item => (item.json.Status || 'To Contact') === 'To Contact')\n  .slice(0, dailyLimit);\n\n// Assign A/B subject line variants randomly\nconst subjects = {\n  A: 'Quick question about {{company}}',\n  B: 'Idea I wanted to run by {{company}}'\n};\n\nconst enriched = leads.map(item => ({\n  ...item.json,\n  subjectVariant: Math.random() < 0.5 ? 'A' : 'B',\n  subjectLine: '',  // filled after OpenAI\n  personalizedIcebreaker: '',\n  campaignId: 'CAMP-' + Date.now().toString(36).toUpperCase(),\n  sentAt: '',\n  trackingId: 'TRK-' + require('crypto').randomUUID().split('-')[0].toUpperCase()\n}));\n\nreturn enriched.map(item => ({ json: item }));"
+        }
+      }
+    },
+    {
+      "id": "openai-personalize",
+      "name": "OpenAI: Generate Icebreaker",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [660, 300],
+      "disabled": false,
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a B2B sales assistant. Generate ONE short personalized icebreaker sentence (max 15 words) for a cold email. Reference the lead's company or role naturally. Do not use markdown, just return the sentence."
+            },
+            {
+              "role": "user",
+              "content": "={{ 'Generate a personalized icebreaker for:\\nName: ' + $json.name + '\\nJob Title: ' + $json.jobTitle + '\\nCompany: ' + $json.company + '\\nIndustry: ' + $json.industry }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.7,
+          "maxTokens": 60
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "__rl": true,
+          "value": "YOUR_OPENAI_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "compose-email",
+      "name": "Compose Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [880, 300],
+      "disabled": false,
+      "parameters": {
+        "language": "javaScript",
+        "sourceCode": {
+          "javaScript": "// Build the full email from template + OpenAI icebreaker\nconst item = $input.item.json;\n\nconst icebreaker = item.choices?.[0]?.message?.content?.trim() || item.personalizedIcebreaker;\n\nconst subjects = {\n  A: icebreaker + ', quick question about ' + item.company,\n  B: icebreaker + ' - idea for ' + item.company\n};\n\nconst emailBody = icebreaker + '\\n\\n' +\n  \"I've been following \" + item.company + \"'s work in \" + (item.industry || 'your space') + ' and noticed you\\'re ' +\n  (item.jobTitle ? 'the ' + item.jobTitle : 'a key person') + ' there.\\n\\n' +\n  'I have an idea that could help you [reach X outcome] in [Y timeframe]. ' +\n  'Would you be open to a quick 10-minute call this week?\\n\\n' +\n  'Best,\\n[Your Name]\\n[Your Title]\\n[Your Company]\\n\\n' +\n  '---\\n' +\n  'If you\\'d prefer not to receive further emails, reply \"unsubscribe\" and I\\'ll remove you immediately.';\n\nreturn {\n  json: {\n    ...item,\n    subjectLine: subjects[item.subjectVariant] || subjects.A,\n    emailBody: emailBody,\n    sentAt: new Date().toISOString()\n  }\n};"
+        }
+      }
+    },
+    {
+      "id": "send-email",
+      "name": "Send via SMTP",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [1100, 300],
+      "disabled": false,
+      "parameters": {
+        "fromEmail": "outreach@yourdomain.com",
+        "fromName": "[Your Name]",
+        "toEmail": "={{ $json.email }}",
+        "subject": "={{ $json.subjectLine }}",
+        "text": "={{ $json.emailBody }}",
+        "options": {
+          "trackOpens": true,
+          "trackClicks": true,
+          "customHeaders": {
+            "headers": {
+              "X-Campaign-ID": "={{ $json.campaignId }}",
+              "X-Lead-ID": "={{ $json.leadId }}",
+              "X-Tracking-ID": "={{ $json.trackingId }}",
+              "X-Variant": "={{ $json.subjectVariant }}"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "smtp": {
+          "__rl": true,
+          "value": "YOUR_SMTP_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "log-sent",
+      "name": "Update Sent Status",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1320, 300],
+      "disabled": false,
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sent Log"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "0": {
+              "columnName": "Campaign ID",
+              "columnValue": "={{ $json.campaignId }}"
+            },
+            "1": {
+              "columnName": "Lead ID",
+              "columnValue": "={{ $json.leadId }}"
+            },
+            "2": {
+              "columnName": "Name",
+              "columnValue": "={{ $json.name }}"
+            },
+            "3": {
+              "columnName": "Email",
+              "columnValue": "={{ $json.email }}"
+            },
+            "4": {
+              "columnName": "Company",
+              "columnValue": "={{ $json.company }}"
+            },
+            "5": {
+              "columnName": "Subject Line",
+              "columnValue": "={{ $json.subjectLine }}"
+            },
+            "6": {
+              "columnName": "Subject Variant",
+              "columnValue": "={{ $json.subjectVariant }}"
+            },
+            "7": {
+              "columnName": "Tracking ID",
+              "columnValue": "={{ $json.trackingId }}"
+            },
+            "8": {
+              "columnName": "Sent At",
+              "columnValue": "={{ $json.sentAt }}"
+            },
+            "9": {
+              "columnName": "Status",
+              "columnValue": "=Sent"
+            }
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "update-campaign-sheet",
+      "name": "Mark in Campaign Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1320, 480],
+      "disabled": false,
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Campaign"
+        },
+        "byRow": {
+          "keyRow": 0,
+          "dataStartRow": 1,
+          "column": "Lead ID"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "0": {
+              "columnName": "Status",
+              "columnValue": "=Sent"
+            },
+            "1": {
+              "columnName": "Subject Variant",
+              "columnValue": "={{ $json.subjectVariant }}"
+            },
+            "2": {
+              "columnName": "Sent Date",
+              "columnValue": "={{ $json.sentAt }}"
+            },
+            "3": {
+              "columnName": "Tracking ID",
+              "columnValue": "={{ $json.trackingId }}"
+            }
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily Schedule (8 AM)": {
+      "main": [
+        [
+          {
+            "node": "Read Leads from Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Leads from Sheet": {
+      "main": [
+        [
+          {
+            "node": "Filter & Enrich Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter & Enrich Leads": {
+      "main": [
+        [
+          {
+            "node": "OpenAI: Generate Icebreaker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI: Generate Icebreaker": {
+      "main": [
+        [
+          {
+            "node": "Compose Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose Email": {
+      "main": [
+        [
+          {
+            "node": "Send via SMTP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send via SMTP": {
+      "main": [
+        [
+          {
+            "node": "Update Sent Status",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Mark in Campaign Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "versionId": "1.0",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "email-campaign"
+    },
+    {
+      "name": "cold-outreach"
+    }
+  ],
+  "id": "cold-email-campaign-engine"
+}

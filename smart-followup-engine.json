@@ -1,0 +1,343 @@
+{
+  "name": "Smart Follow-up Engine",
+  "nodes": [
+    {
+      "id": "followup-schedule",
+      "name": "Daily Follow-up Check (10 AM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [0, 300],
+      "disabled": false,
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 10 * * 1-5"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "read-sent-log",
+      "name": "Read Sent Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [250, 300],
+      "disabled": false,
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sent Log"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "filter-followup-candidates",
+      "name": "Filter Follow-up Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [480, 300],
+      "disabled": false,
+      "parameters": {
+        "language": "javaScript",
+        "sourceCode": {
+          "javaScript": "// Find leads sent 3+ days ago with no reply and no previous follow-up\nconst now = new Date();\nconst threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);\nconst sevenDaysAfter = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);\n\nconst candidates = $input.all().filter(item => {\n  const lead = item.json;\n  \n  // Must have been sent\n  if (lead.Status !== 'Sent' && lead.Status !== 'Follow-up Sent') return false;\n  \n  // Must not have bounced\n  if (lead.Bounced === 'TRUE' || lead.Bounced === true) return false;\n  \n  // Must not have replied\n  if (lead.Replied === 'TRUE' || lead.Replied === true) return false;\n  \n  // Sent between 3 and 7 days ago (not too old, not too fresh)\n  const sentDate = new Date(lead['Sent At'] || lead.sentAt || lead.SentDate);\n  if (isNaN(sentDate.getTime())) return false;\n  if (sentDate > threeDaysAgo) return false;  // Too recent, wait 3 days\n  \n  // If already had a follow-up, only follow up once more (check follow-up count)\n  const followUpCount = parseInt(lead.FollowUpCount || '0');\n  if (followUpCount >= 2) return false;  // Max 2 follow-ups\n  \n  return true;\n});\n\n// Classify each candidate\nreturn candidates.map(item => {\n  const lead = item.json;\n  const opened = lead.Opened === 'TRUE' || lead.Opened === true;\n  const clicked = lead.Clicked === 'TRUE' || lead.Clicked === true;\n  const followUpCount = parseInt(lead.FollowUpCount || '0');\n  \n  let followUpType = 'no-engagement';\n  if (clicked) followUpType = 'clicked-no-reply';\n  else if (opened) followUpType = 'opened-no-reply';\n  \n  return {\n    json: {\n      ...lead,\n      followUpType,\n      followUpCount: followUpCount + 1\n    }\n  };\n});"
+        }
+      }
+    },
+    {
+      "id": "route-followup-type",
+      "name": "Route by Engagement",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [710, 300],
+      "disabled": false,
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.followUpType }}",
+        "rules": {
+          "rules": [
+            {
+              "id": "opened-no-reply",
+              "value1": "opened-no-reply",
+              "output": 0
+            },
+            {
+              "id": "clicked-no-reply",
+              "value1": "clicked-no-reply",
+              "output": 1
+            },
+            {
+              "id": "no-engagement",
+              "value1": "no-engagement",
+              "output": 2
+            }
+          ],
+          "fallbackOutput": 0
+        }
+      }
+    },
+    {
+      "id": "opened-nudge",
+      "name": "Build: Opened No-Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [960, 150],
+      "disabled": false,
+      "parameters": {
+        "language": "javaScript",
+        "sourceCode": {
+          "javaScript": "// Gentle nudge for leads who opened but didn't reply\nconst lead = $input.item.json;\n\nconst followUpSubject = 'Re: ' + lead['Subject Line'];\nconst followUpBody = 'Hi ' + (lead.Name || lead.name) + ',\\n\\n' +\n  'I noticed you opened my previous email — just wanted to make sure it didn\\'t get lost in the shuffle.\\n\\n' +\n  'Would a quick 5-minute call this Thursday or Friday work for you?\\n\\n' +\n  'Best,\\n[Your Name]';\n\nreturn {\n  json: {\n    ...lead,\n    followUpSubject,\n    followUpBody,\n    followUpType: 'opened-no-reply'\n  }\n};"
+        }
+      }
+    },
+    {
+      "id": "clicked-nudge",
+      "name": "Build: Clicked No-Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [960, 320],
+      "disabled": false,
+      "parameters": {
+        "language": "javaScript",
+        "sourceCode": {
+          "javaScript": "// Warm follow-up for leads who clicked a link but didn't reply\nconst lead = $input.item.json;\n\nconst followUpSubject = 'Following up — ' + (lead.Company || lead.company);\nconst followUpBody = 'Hi ' + (lead.Name || lead.name) + ',\\n\\n' +\n  'Saw you checked out the link I shared — glad it caught your interest!\\n\\n' +\n  'I have a few more insights specific to ' + (lead.Company || lead.company) +\n  ' that I think you\\'d find valuable. Are you open to a quick chat next week?\\n\\n' +\n  'Best,\\n[Your Name]';\n\nreturn {\n  json: {\n    ...lead,\n    followUpSubject,\n    followUpBody,\n    followUpType: 'clicked-no-reply'\n  }\n};"
+        }
+      }
+    },
+    {
+      "id": "cold-restart",
+      "name": "Build: No Engagement",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [960, 490],
+      "disabled": false,
+      "parameters": {
+        "language": "javaScript",
+        "sourceCode": {
+          "javaScript": "// Different approach for leads who never engaged\nconst lead = $input.item.json;\n\nconst followUpSubject = 'Different angle for ' + (lead.Company || lead.company);\nconst followUpBody = 'Hi ' + (lead.Name || lead.name) + ',\\n\\n' +\n  'I know you\\'re busy, so I\\'ll keep this short — different angle than my last message.\\n\\n' +\n  'We recently helped a company similar to ' + (lead.Company || lead.company) +\n  ' achieve [specific result]. Thought it might be relevant to what you\\'re working on.\\n\\n' +\n  'Worth a 10-minute exploration?\\n\\n' +\n  'Best,\\n[Your Name]';\n\nreturn {\n  json: {\n    ...lead,\n    followUpSubject,\n    followUpBody,\n    followUpType: 'no-engagement'\n  }\n};"
+        }
+      }
+    },
+    {
+      "id": "send-followup",
+      "name": "Send Follow-up Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [1200, 300],
+      "disabled": false,
+      "parameters": {
+        "fromEmail": "outreach@yourdomain.com",
+        "fromName": "[Your Name]",
+        "toEmail": "={{ $json.email || $json.Email }}",
+        "subject": "={{ $json.followUpSubject }}",
+        "text": "={{ $json.followUpBody }}",
+        "options": {
+          "trackOpens": true,
+          "trackClicks": true,
+          "customHeaders": {
+            "headers": {
+              "X-Campaign-ID": "={{ $json['Campaign ID'] || $json.campaignId }}",
+              "X-Lead-ID": "={{ $json['Lead ID'] || $json.leadId }}",
+              "X-Tracking-ID": "={{ ($json['Tracking ID'] || $json.trackingId) + '-FU' + $json.followUpCount }}",
+              "X-Follow-Up": "=true"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "smtp": {
+          "__rl": true,
+          "value": "YOUR_SMTP_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "update-followup-sent",
+      "name": "GS: Log Follow-up Sent",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1420, 300],
+      "disabled": false,
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sent Log"
+        },
+        "byRow": {
+          "keyRow": 0,
+          "dataStartRow": 1,
+          "column": "Tracking ID"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "0": {
+              "columnName": "Status",
+              "columnValue": "=Follow-up Sent"
+            },
+            "1": {
+              "columnName": "Follow-up Count",
+              "columnValue": "={{ $json.followUpCount }}"
+            },
+            "2": {
+              "columnName": "Last Follow-up At",
+              "columnValue": "={{ new Date().toISOString() }}"
+            },
+            "3": {
+              "columnName": "Follow-up Type",
+              "columnValue": "={{ $json.followUpType }}"
+            }
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily Follow-up Check (10 AM)": {
+      "main": [
+        [
+          {
+            "node": "Read Sent Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Sent Log": {
+      "main": [
+        [
+          {
+            "node": "Filter Follow-up Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Follow-up Candidates": {
+      "main": [
+        [
+          {
+            "node": "Route by Engagement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Engagement": {
+      "main": [
+        [
+          {
+            "node": "Build: Opened No-Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build: Clicked No-Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build: No Engagement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build: Opened No-Reply": {
+      "main": [
+        [
+          {
+            "node": "Send Follow-up Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build: Clicked No-Reply": {
+      "main": [
+        [
+          {
+            "node": "Send Follow-up Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build: No Engagement": {
+      "main": [
+        [
+          {
+            "node": "Send Follow-up Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Follow-up Email": {
+      "main": [
+        [
+          {
+            "node": "GS: Log Follow-up Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "versionId": "1.0",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "follow-up"
+    },
+    {
+      "name": "email-sequence"
+    }
+  ],
+  "id": "smart-followup-engine"
+}

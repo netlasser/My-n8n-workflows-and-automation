@@ -1,0 +1,429 @@
+{
+  "name": "Engagement Tracker",
+  "nodes": [
+    {
+      "id": "event-webhook",
+      "name": "ESP Event Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [0, 300],
+      "disabled": false,
+      "parameters": {
+        "path": "email-events",
+        "responseMode": "onReceived",
+        "responseData": "noData",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "email-events"
+    },
+    {
+      "id": "parse-event",
+      "name": "Parse Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "disabled": false,
+      "parameters": {
+        "language": "javaScript",
+        "sourceCode": {
+          "javaScript": "// SendGrid sends an array of events\n// Normalize each event into a standard format\nconst events = $input.all();\nconst parsed = [];\n\nfor (const item of events) {\n  const e = item.json;\n  \n  // Handle both single event and batch array\n  const batch = Array.isArray(e) ? e : [e];\n  \n  for (const event of batch) {\n    const normalized = {\n      eventType: event.event || event.eventType || 'unknown',\n      email: event.email || event.to || '',\n      trackingId: event['X-Tracking-ID'] || event.trackingId || event.unique_args?.tracking_id || '',\n      leadId: event['X-Lead-ID'] || event.leadId || event.unique_args?.lead_id || '',\n      campaignId: event['X-Campaign-ID'] || event.campaignId || event.unique_args?.campaign_id || '',\n      variant: event['X-Variant'] || event.variant || event.unique_args?.variant || '',\n      timestamp: new Date((event.timestamp || Date.now()) * 1000).toISOString(),\n      url: event.url || '',\n      userAgent: event.useragent || event.user_agent || '',\n      ip: event.ip || '',\n      category: event.category || '',\n      reason: event.reason || event.bounce_reason || '',\n      status: event.status || event.bounce_status || ''\n    };\n    parsed.push({ json: normalized });\n  }\n}\n\nreturn parsed;"
+        }
+      }
+    },
+    {
+      "id": "route-event",
+      "name": "Route by Event Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [500, 300],
+      "disabled": false,
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.eventType }}",
+        "rules": {
+          "rules": [
+            {
+              "id": "open-rule",
+              "value1": "open",
+              "output": 0
+            },
+            {
+              "id": "click-rule",
+              "value1": "click",
+              "output": 1
+            },
+            {
+              "id": "bounce-rule",
+              "value1": "bounce",
+              "output": 2
+            },
+            {
+              "id": "dropped-rule",
+              "value1": "dropped",
+              "output": 2
+            },
+            {
+              "id": "spam-report",
+              "value1": "spamreport",
+              "output": 3
+            },
+            {
+              "id": "unsubscribe",
+              "value1": "unsubscribe",
+              "output": 3
+            }
+          ],
+          "fallbackOutput": 4
+        }
+      }
+    },
+    {
+      "id": "log-open",
+      "name": "Update Open Count",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [750, 100],
+      "disabled": false,
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sent Log"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "find-tracking-open",
+      "name": "Find & Update Open Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [970, 100],
+      "disabled": false,
+      "parameters": {
+        "language": "javaScript",
+        "sourceCode": {
+          "javaScript": "// Match event to row in Sent Log by Tracking ID\nconst event = $input.first().json;  // The webhook event\nconst trackingKey = event.trackingId || event.leadId;\n\n// $binary contains the Google Sheets output from previous node\nif (!trackingKey) {\n  return [{ json: { matched: false, reason: 'No tracking ID' } }];\n}\n\n// We need to find the row by tracking ID\n// In practice, this node receives the Sheets read output\n// Match by Tracking ID column\nreturn [{ json: { event, trackingKey } }];"
+        }
+      }
+    },
+    {
+      "id": "gsheet-update-open",
+      "name": "GS: Mark Opened",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1190, 100],
+      "disabled": false,
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sent Log"
+        },
+        "byRow": {
+          "keyRow": 0,
+          "dataStartRow": 1,
+          "column": "Tracking ID"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "0": {
+              "columnName": "Opened",
+              "columnValue": "=TRUE"
+            },
+            "1": {
+              "columnName": "Last Opened At",
+              "columnValue": "={{ $json.timestamp }}"
+            },
+            "2": {
+              "columnName": "Open Count",
+              "columnValue": "={{ parseInt($json.openCount || '0') + 1 }}"
+            }
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "log-click",
+      "name": "GS: Mark Clicked",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [750, 260],
+      "disabled": false,
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sent Log"
+        },
+        "byRow": {
+          "keyRow": 0,
+          "dataStartRow": 1,
+          "column": "Tracking ID"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "0": {
+              "columnName": "Clicked",
+              "columnValue": "=TRUE"
+            },
+            "1": {
+              "columnName": "Clicked At",
+              "columnValue": "={{ $json.timestamp }}"
+            },
+            "2": {
+              "columnName": "Clicked URL",
+              "columnValue": "={{ $json.url }}"
+            },
+            "3": {
+              "columnName": "Click Count",
+              "columnValue": "={{ parseInt($json.clickCount || '0') + 1 }}"
+            }
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "log-bounce",
+      "name": "GS: Mark Bounced",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [750, 420],
+      "disabled": false,
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sent Log"
+        },
+        "byRow": {
+          "keyRow": 0,
+          "dataStartRow": 1,
+          "column": "Tracking ID"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "0": {
+              "columnName": "Bounced",
+              "columnValue": "=TRUE"
+            },
+            "1": {
+              "columnName": "Bounce Reason",
+              "columnValue": "={{ $json.reason }}"
+            },
+            "2": {
+              "columnName": "Status",
+              "columnValue": "=Bounced"
+            }
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "log-spam",
+      "name": "GS: Mark Spam/Unsub",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [750, 580],
+      "disabled": false,
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sent Log"
+        },
+        "byRow": {
+          "keyRow": 0,
+          "dataStartRow": 1,
+          "column": "Tracking ID"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "0": {
+              "columnName": "Status",
+              "columnValue": "={{ $json.eventType === 'unsubscribe' ? 'Unsubscribed' : 'Spam Report' }}"
+            },
+            "1": {
+              "columnName": "Bounced",
+              "columnValue": "=TRUE"
+            }
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "log-other",
+      "name": "Log Unknown Event",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [750, 740],
+      "disabled": false,
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "ESP Event Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Event": {
+      "main": [
+        [
+          {
+            "node": "Route by Event Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Event Type": {
+      "main": [
+        [
+          {
+            "node": "Update Open Count",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "GS: Mark Clicked",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "GS: Mark Bounced",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "GS: Mark Spam/Unsub",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Unknown Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Open Count": {
+      "main": [
+        [
+          {
+            "node": "Find & Update Open Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find & Update Open Row": {
+      "main": [
+        [
+          {
+            "node": "GS: Mark Opened",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "versionId": "1.0",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "email-tracking"
+    },
+    {
+      "name": "engagement"
+    }
+  ],
+  "id": "engagement-tracker"
+}

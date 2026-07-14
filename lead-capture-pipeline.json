@@ -1,0 +1,260 @@
+{
+  "name": "Multi-Source Lead Capture & CRM Pipeline",
+  "nodes": [
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook (Lead Capture)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [0, 300],
+      "disabled": false,
+      "parameters": {
+        "path": "lead-capture",
+        "responseMode": "onReceived",
+        "responseData": "allEntries",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "lead-capture"
+    },
+    {
+      "id": "normalize-score",
+      "name": "Normalize & Score Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "disabled": false,
+      "parameters": {
+        "language": "javaScript",
+        "sourceCode": {
+          "javaScript": "// Normalize incoming form fields to a standard schema\nconst item = $input.item.json;\n\nconst lead = {\n  timestamp: new Date().toISOString(),\n  name: item.name || item.Name || item.full_name || item.fullName || '',\n  email: item.email || item.Email || item.email_address || '',\n  phone: item.phone || item.Phone || item.phone_number || '',\n  company: item.company || item.Company || item.organization || item.org || '',\n  jobTitle: item.jobTitle || item.job_title || item.role || '',\n  message: item.message || item.Message || item.notes || item.comments || '',\n  source: item.source || item.form_type || 'webhook',\n  leadId: 'LEAD-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).substring(2, 6).toUpperCase()\n};\n\n// --- Lead Scoring ---\n// Rule 1: Keyword match in message\nconst hotKeywords = ['demo', 'pricing', 'urgent', 'partnership', 'quote', 'buy', 'purchase', 'speak to sales'];\nconst msgLower = lead.message.toLowerCase();\nconst hasHotKeyword = hotKeywords.some(k => msgLower.includes(k));\n\n// Rule 2: Has both name and company (real lead, not spam)\nconst hasIdentity = lead.name.length > 1 && lead.company.length > 1;\n\n// Rule 3: Company email signals real business\nconst hasBusinessEmail = lead.email.endsWith('.com') || lead.email.endsWith('.io') || lead.email.endsWith('.org');\n\n// Composite score\nlet score = 0;\nif (hasHotKeyword) score += 3;\nif (hasIdentity) score += 2;\nif (hasBusinessEmail) score += 1;\n\nlead.score = score;\nlead.status = score >= 3 ? 'Hot' : 'Warm';\nlead.priority = score >= 3 ? 'high' : 'low';\n\nreturn { json: lead };"
+        }
+      }
+    },
+    {
+      "id": "google-sheets-log",
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [500, 300],
+      "disabled": false,
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "All Leads"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "0": {
+              "columnName": "Lead ID",
+              "columnValue": "={{ $json.leadId }}"
+            },
+            "1": {
+              "columnName": "Timestamp",
+              "columnValue": "={{ $json.timestamp }}"
+            },
+            "2": {
+              "columnName": "Name",
+              "columnValue": "={{ $json.name }}"
+            },
+            "3": {
+              "columnName": "Email",
+              "columnValue": "={{ $json.email }}"
+            },
+            "4": {
+              "columnName": "Phone",
+              "columnValue": "={{ $json.phone }}"
+            },
+            "5": {
+              "columnName": "Company",
+              "columnValue": "={{ $json.company }}"
+            },
+            "6": {
+              "columnName": "Job Title",
+              "columnValue": "={{ $json.jobTitle }}"
+            },
+            "7": {
+              "columnName": "Message",
+              "columnValue": "={{ $json.message }}"
+            },
+            "8": {
+              "columnName": "Source",
+              "columnValue": "={{ $json.source }}"
+            },
+            "9": {
+              "columnName": "Score",
+              "columnValue": "={{ $json.score }}"
+            },
+            "10": {
+              "columnName": "Status",
+              "columnValue": "={{ $json.status }}"
+            },
+            "11": {
+              "columnName": "Priority",
+              "columnValue": "={{ $json.priority }}"
+            }
+          }
+        },
+        "options": {
+          "cellFormat": "userEntered",
+          "handlingExtraData": "insertInNewColumn"
+        }
+      },
+      "credentials": {
+        "googleSheetsApi": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SERVICE_ACCOUNT_NAME"
+        }
+      }
+    },
+    {
+      "id": "if-hot-lead",
+      "name": "Is Hot Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [750, 300],
+      "disabled": false,
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "hot-score-check",
+              "leftValue": "={{ $json.score }}",
+              "rightValue": "=3",
+              "operator": {
+                "type": "number",
+                "operation": "largerEqual"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "slack-notify",
+      "name": "Slack: Hot Lead Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [1000, 200],
+      "disabled": false,
+      "parameters": {
+        "channel": "leads-hot",
+        "text": "={{ '🔥 *Hot Lead Alert!*\\n\\n*Name:* ' + $json.name + '\\n*Company:* ' + $json.company + '\\n*Email:* ' + $json.email + '\\n*Message:* ' + $json.message + '\\n*Score:* ' + $json.score + '\\n*Lead ID:* ' + $json.leadId }}",
+        "otherOptions": {
+          "markdown": true
+        }
+      },
+      "credentials": {
+        "slackApi": {
+          "__rl": true,
+          "value": "YOUR_SLACK_CREDENTIALS_NAME"
+        }
+      }
+    },
+    {
+      "id": "email-notify",
+      "name": "Email: Hot Lead Alert",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [1000, 400],
+      "disabled": false,
+      "parameters": {
+        "fromEmail": "leads@yourcompany.com",
+        "toEmail": "sales@yourcompany.com",
+        "subject": "={{ '🔥 Hot Lead: ' + $json.name + ' from ' + $json.company }}",
+        "text": "={{ 'New hot lead captured:\\n\\nName: ' + $json.name + '\\nEmail: ' + $json.email + '\\nPhone: ' + $json.phone + '\\nCompany: ' + $json.company + '\\nJob Title: ' + $json.jobTitle + '\\nMessage: ' + $json.message + '\\nSource: ' + $json.source + '\\nLead ID: ' + $json.leadId + '\\n\\nReview in Google Sheets: https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID' }}",
+        "options": {}
+      },
+      "credentials": {
+        "smtp": {
+          "__rl": true,
+          "value": "YOUR_SMTP_CREDENTIALS_NAME"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook (Lead Capture)": {
+      "main": [
+        [
+          {
+            "node": "Normalize & Score Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize & Score Lead": {
+      "main": [
+        [
+          {
+            "node": "Log to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Is Hot Lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Hot Lead?": {
+      "main": [
+        [
+          {
+            "node": "Slack: Hot Lead Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Email: Hot Lead Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "pinData": {},
+  "versionId": "1.0",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "lead-generation"
+    },
+    {
+      "name": "crm"
+    },
+    {
+      "name": "portfolio"
+    }
+  ],
+  "id": "multi-source-lead-capture"
+}
